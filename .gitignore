@@ -1,6 +1,6 @@
-# Google App Engine generated folder
-appengine-generated/
-
 .DS_Store
 *.swp
 *.swo
+tmp*
+tmp_*
+*.pyc

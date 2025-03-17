@@ -1,8 +1,9 @@
 import bpy
+import os
 import math
+from mathutils import Matrix, Vector, Quaternion, Euler
 from pdebug.utils.fileio import load_content
 from pdebug.utils.bpy import load_gltf
-from mathutils import Matrix, Vector, Quaternion, Euler
 import torch
 import numpy as np
 
@@ -147,7 +148,7 @@ for relation in skeleton_relationship:
     parent, child = relation
     relations[child] = parent
 
-root = "/Users/bytedance/code/bpy_examples"
+root = os.path.expanduser("~/code/bpy_examples")
 gltf_path = f"{root}/test_data/robot_v1.gltf"
 load_gltf(filepath=gltf_path, location=(0, 3, 0), name="robot_v1")
 armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']

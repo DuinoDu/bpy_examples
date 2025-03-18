@@ -2,13 +2,36 @@ import bpy
 import os
 import math
 from mathutils import Matrix, Vector, Quaternion, Euler
-from pdebug.utils.fileio import load_content
-from pdebug.utils.bpy import load_gltf
+import json
 import torch
 import numpy as np
 
 # bpy.context.preferences.view.show_splash = False
 # bpy.ops.wm.save_userpref()
+
+
+def load_gltf(filepath: str, location = None, name="ImportedGLTFParent"):
+    before_import = set(bpy.context.scene.objects.keys())
+    bpy.ops.import_scene.gltf(filepath=filepath)
+    after_import = set(bpy.context.scene.objects.keys())
+    
+    new_objects = after_import - before_import
+    root_objects = [bpy.context.scene.objects[obj] for obj in new_objects if bpy.context.scene.objects[obj].parent is None]
+    
+    if not root_objects:
+        print("Not root object found in gltf.")
+        return
+
+    if location:
+        # create a parent object
+        parent_object = bpy.data.objects.new(name, None)
+        bpy.context.scene.collection.objects.link(parent_object)
+        
+        # put all gltf object to parent object
+        for root_obj in root_objects:
+            root_obj.parent = parent_object
+        # move parent object
+        parent_object.location = location
 
 
 def compute_rotation_from_vectors_bpy(vec1, vec2):
@@ -41,6 +64,7 @@ def compute_rotation_from_vectors_bpy(vec1, vec2):
 
 def bpy_vector_to_pytorch_tensor(vec):
     return torch.tensor([vec.x, vec.y, vec.z], dtype=torch.float32).unsqueeze(0)
+
 
 def pytorch_tensor_to_bpy_matrix(tensor):
     return Matrix(T_torch.squeeze().numpy().tolist())
@@ -141,8 +165,9 @@ class RotationFromVectors(torch.nn.Module):
 bpy.ops.object.select_all(action="SELECT")
 bpy.ops.object.delete()
 
-kps_data = load_content("./animation_transform.json")
-skeleton_relationship = load_content("./skeleton_relationship.json")
+
+kps_data = json.load(open("./animation_transform.json", "r"))
+skeleton_relationship = json.load(open("./skeleton_relationship.json", "r"))
 relations = dict()
 for relation in skeleton_relationship:
     parent, child = relation

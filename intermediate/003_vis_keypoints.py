@@ -10,6 +10,19 @@ import numpy as np
 # bpy.ops.wm.save_userpref()
 
 
+def add_text(text, location, rotation=(0,0,0), scale=(1,1,1), color=(1, 1, 1, 1), name="TextObject"):
+    bpy.ops.object.text_add(location=location)
+    text_obj = bpy.context.active_object
+    text_obj.name = name
+    text_obj.rotation_euler = rotation
+    text_obj.scale = (scale, scale, scale) if isinstance(scale, (int, float)) else scale
+    text_obj.data.body = text
+
+    material = bpy.data.materials.new(name="TextMaterial")
+    material.diffuse_color = color  # 设置材质颜色
+    text_obj.data.materials.append(material)
+
+
 def load_gltf(filepath: str, location = None, name="ImportedGLTFParent"):
     before_import = set(bpy.context.scene.objects.keys())
     bpy.ops.import_scene.gltf(filepath=filepath)
@@ -157,7 +170,7 @@ class RotationFromVectors(torch.nn.Module):
             ], dim=-1).reshape(*batch_shape, 4, 4)
             
             identity = torch.where(non_parallel_mask.unsqueeze(-1).unsqueeze(-1),
-                                 rot_matrix, identity)
+                                   rot_matrix, identity)
         
         return identity
 
@@ -207,16 +220,45 @@ joints_armature_obj = bpy.data.objects.new(name="JointsArmatureObj", object_data
 bpy.context.collection.objects.link(joints_armature_obj)
 joints_armature_obj.location = (0, -2, 0)    # move to left
 joints_armature_obj.animation_data_create()
-action = bpy.data.actions.new("ComputedAction2")
-action.use_frame_range = True
-action.frame_start = 1
-action.frame_end = len(kps_data["frames"])
-armature_obj.animation_data.action = action
+
+onnx_armature = bpy.data.armatures.new(name="OnnxArmature")
+onnx_armature_obj = bpy.data.objects.new(name="JointsArmatureObj", object_data=onnx_armature)
+bpy.context.collection.objects.link(onnx_armature_obj)
+onnx_armature_obj.location = (0, -5, 0)    # move to left
+onnx_armature_obj.animation_data_create()
 
 rotate_module = RotationFromVectors()
 torch.save(rotate_module, "tmp_rotate_op.pt")
 rotate_op = torch.load("tmp_rotate_op.pt", weights_only=False)
 rotate_op.eval()
+
+try:
+    import onnxruntime as ort
+    onnxfile = "/Users/bytedance/Downloads/rotation_vector_model.onnx"
+    sess = ort.InferenceSession(onnxfile, providers=['CPUExecutionProvider'])
+except Exception as e:
+    sess = None
+
+
+def onnx_infer(kps_13):
+    network_inputs = {"keypoints": kps_13.astype(np.float32)}
+    output_name = [output.name for output in sess.get_outputs()]
+    network_outputs = sess.run(output_name, network_inputs)
+    rotation_matrix = [rotation_vector_to_matrix(o) for o in network_outputs]
+    return rotation_matrix
+
+
+def rotation_vector_to_matrix(r):
+    # 计算旋转角度
+    theta = math.sqrt(r[0]**2 + r[1]**2 + r[2]**2)
+    # 如果旋转角度为 0，返回单位矩阵
+    if theta < 1e-6:
+        return Matrix.Identity(3)
+    # 计算单位旋转轴
+    u = [r[0] / theta, r[1] / theta, r[2] / theta]
+    # 使用 Matrix.Rotation 创建旋转矩阵
+    R = Matrix.Rotation(theta, 3, u)
+    return R
 
 
 for frame_idx, frame in enumerate(kps_data["frames"]):
@@ -225,6 +267,7 @@ for frame_idx, frame in enumerate(kps_data["frames"]):
 
     # for first frame, create bone in joints_armature_obj
     if frame_idx == 0:
+        # joints_armature
         for name in frame["joints"]:
             bpy.context.view_layer.objects.active = joints_armature_obj
             bpy.ops.object.mode_set(mode='EDIT')
@@ -238,6 +281,22 @@ for frame_idx, frame in enumerate(kps_data["frames"]):
                 bpy.ops.object.mode_set(mode='EDIT')
                 bone = joints_armature.edit_bones.get(name)
                 bone.parent = joints_armature.edit_bones.get(parent_name)
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+        # onnx_armature
+        for name in frame["joints"]:
+            bpy.context.view_layer.objects.active = onnx_armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            new_bone = onnx_armature.edit_bones.new(name=name)
+            new_bone.head = Vector(frame["joints"][name][0])
+            new_bone.tail = Vector(frame["joints"][name][1])
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for name in frame["joints"]:
+            parent_name = relations.get(name, None)
+            if parent_name is not None:
+                bpy.ops.object.mode_set(mode='EDIT')
+                bone = onnx_armature.edit_bones.get(name)
+                bone.parent = onnx_armature.edit_bones.get(parent_name)
                 bpy.ops.object.mode_set(mode='OBJECT')
 
     for name in frame["joints"]:
@@ -284,6 +343,53 @@ for frame_idx, frame in enumerate(kps_data["frames"]):
             bone.keyframe_insert("location", frame=current_frame)
             bone.keyframe_insert("rotation_quaternion", frame=current_frame)
             bone.keyframe_insert("scale", frame=current_frame)
+    
+    # onnx test
+    if sess is None:
+        continue
+    # 0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 27, 28 defind by mediapipe pose
+    kps_13 = []
+    kps_13.append(frame["joints"]["spain"][0])
+    kps_13.append(frame["joints"]["right arm"][0])
+    kps_13.append(frame["joints"]["left arm"][0])
+    kps_13.append(frame["joints"]["right arm"][1])
+    kps_13.append(frame["joints"]["left arm"][1])
+    kps_13.append(frame["joints"]["right forearm"][1])
+    kps_13.append(frame["joints"]["left forearm"][1])
+    kps_13.append(frame["joints"]["right thigh"][0])
+    kps_13.append(frame["joints"]["left thigh"][0])
+    kps_13.append(frame["joints"]["right thigh"][1])
+    kps_13.append(frame["joints"]["left thigh"][1])
+    kps_13.append(frame["joints"]["right culf"][1])
+    kps_13.append(frame["joints"]["left culf"][1])
+    rotation_matrix_8 = onnx_infer(np.array(kps_13))
+    bone_order = ["right forearm", "left forearm",
+                  "right culf", "left culf",
+                  "right arm", "left arm",
+                  "right thigh", "left thigh"]
+    # 'rotation_vector_0_2', 'rotation_vector_1_3',
+    # 'rotation_vector_6_8', 'rotation_vector_7_9',
+    # 'rotation_vector_root0_0', 'rotation_vector_root1_1',
+    # 'rotation_vector_root6_6', 'rotation_vector_root7_7'
+
+    for name, T_parent_child in zip(bone_order, rotation_matrix_8):
+        matrix_basis = rest_matrix[name].to_4x4().inverted() @ T_parent_child.to_4x4()
+
+        loc, rot_quat, scale = matrix_basis.decompose()
+        for bone in [onnx_armature_obj.pose.bones.get(name), ]:
+            bone.location = loc
+            bone.rotation_quaternion = rot_quat
+            bone.scale = scale
+            bone.keyframe_insert("location", frame=current_frame)
+            bone.keyframe_insert("rotation_quaternion", frame=current_frame)
+            bone.keyframe_insert("scale", frame=current_frame)
+
+
+rotation = (math.radians(90), 0, math.radians(90))
+add_text("onnx", (0, -5.3, 2.8), rotation=rotation, scale=0.5, color=(1, 0.5, 0.5, 1))
+add_text("python", (0, -5.3+3, 2.8), rotation=rotation, scale=0.5, color=(1, 0.5, 0.5, 1))
+add_text("keypoints", (0, -5.3+5, 2.8), rotation=rotation, scale=0.5, color=(1, 0.5, 0.5, 1))
+add_text("python", (0, -5.3+8, 2.8), rotation=rotation, scale=0.5, color=(1, 0.5, 0.5, 1))
 
 bpy.context.scene.frame_set(1)
 bpy.ops.object.select_all(action="DESELECT")
